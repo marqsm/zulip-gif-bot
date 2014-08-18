@@ -1,3 +1,7 @@
+# custom
+API_KEY
+conf.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

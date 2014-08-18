@@ -1,123 +1,164 @@
 #!/usr/bin/env python
 
+import opc
+from PIL import Image, ImageFilter
+
 import zulip
-import json
 import requests
-import random
+import re
 import os
 
-f = open('subscriptions.txt', 'r')
+ZULIP_USERNAME = "led-bot@students.hackerschool.com"
+api_file = open('API_KEY', 'r')
+API_KEY = api_file.read()
+BOT_EMAIL = "led-bot@students.hackerschool.com"
+LED_SCREEN_ADDRESS = '10.0.5.184:7890'
+zulipClient = zulip.Client(email=ZULIP_USERNAME, api_key=API_KEY)
 
-ZULIP_STREAMS = []
 
-try:
-    for line in f: 
-        ZULIP_STREAMS.append(line.strip())
-finally: 
-    f.close()
+class LedScreen:
+    def __init__(self, address):
+        self.matrixWidth = 64
+        self.matrixHeight = 16
+        self.matrix_size = self.matrixWidth * self.matrixHeight
+        self.ADDRESS = address
+        self.opcClient = opc.Client(self.ADDRESS)
 
-client = zulip.Client(email=os.environ['ZULIP_USERNAME'],
-                      api_key=os.environ['ZULIP_API_KEY'])
+    def loadImage(self, filename):
+        try:
+            self.image = Image.open(filename)
+        except:
+            print("unable to load image")
+        self.imageWidth, self.imageHeight = self.image.size
+        print("image loaded: ")
+        print(self.image.format, self.image.size, self.image.mode)
 
-client.add_subscriptions([{"name": stream_name} for stream_name in ZULIP_STREAMS])
+    def showImage(self):
+        print("showImage")
+        if self.opcClient.can_connect():
+            print('connected to %s' % self.ADDRESS)
+            self._showImage(self.image, self.opcClient)
 
-class LastMsg:
-
-    def __init__(self):
-        self.msg_ids = {}
-
-    def update(self, _stream, _topic, _id):
-        if _stream in self.msg_ids:
-            if _topic in self.msg_ids[_stream]:
-                self.msg_ids[_stream][_topic].append(_id)
+    def _showImage(self, ledImage, client):
+        print("_showImage")
+        # Test if it can connect
+        my_pixels = []
+        for i in xrange(0, self.matrix_size):
+            x = i % 64
+            y = int(i / 64)
+            if (x < self.imageWidth) and (y < self.imageHeight):
+                r, g, b, a = ledImage.getpixel((x, y))
+                if a == 0:
+                    r, g, b = 0, 0, 0
+                my_pixels.append((b, g, r))
             else:
-                self.msg_ids[_stream][_topic] = [_id]
-        else: 
-            self.msg_ids[_stream] = dict()
-            self.msg_ids[_stream][_topic] = [_id]
-        
+                my_pixels.append((0, 0, 0))
 
-    def getMsgId(self, _stream, _topic):
-        return self.msg_ids[_stream][_topic].pop()
+        # dump data to LED display
+        self.opcClient.put_pixels(my_pixels, channel=0)
 
-    def checkEmpty(self, _stream, _topic):
-        if (len(self.msg_ids) == 0):
-            return True
+    def runCommand(self, command):
+        print("running command ", command)
+        self.loadImage('megaman.png')
+        self.showImage()
 
-        elif (_stream not in self.msg_ids or len(self.msg_ids[_stream]) == 0):
-            return True
 
-        elif (_topic not in self.msg_ids[_stream] or len(self.msg_ids[_stream][_topic]) == 0):
-            return True
+def isBotMessage(senderEmail, msgContent):
+    matchRule = '^(\\@\\*\\*)*led-bot(\\*\\*)*\s+show'
 
-        else:
-            return False
+    # Check that bot is not talking to itself
+    if senderEmail == BOT_EMAIL:
+        return False
 
-last_message = LastMsg()
+    # Check is message is meant for the bot
+    content = msgContent.upper().split()
+    print(content)
+    if re.match(matchRule, msgContent, flags=re.I or re.X):
+        return True
 
-# call respond function when client interacts with gif bot
+    return False
+
+
+# Check if message is an undo-command
+def isUndo(msgContent):
+    content = msgContent.upper().split()
+    if (content[0] == "UNDO"):
+        return True
+    return False
+
+
+# Get response object for user sent message
+def getResponseContent(msg):
+    if msg["type"] == "stream":
+        # user message was public
+        msgTo = msg["display_recipient"]    # name of the stream
+    elif msg["type"] == "private":
+        # message sent by user is a private stream message
+        msgTo = msg["sender_email"]
+
+    msgText = """JUST GIVE ME A SEC I'LL SHOW YOUR STUFF WHEN I HAVE THE TIME
+                WE'RE ALL UNDER A LOT OF PRESSURE HERE!!!"""
+    resp = {
+        "type": msg["type"],
+        "subject": msg["subject"],              # topic within the stream
+        "to": msgTo,                             # name of the stream
+        "content": "%s" % msgText               # message to print to stream
+    }
+
+    return resp
+
+
+# Undo-functionality, sends a patch-request to ZULIP-API, to edit (empty) a message
+def undoLastMessage(msg, last_message):
+    if not last_message.checkEmpty(msg['display_recipient'], msg['subject']):
+        payload = {'message_id': last_message.getMsgId(msg['display_recipient'], msg['subject']),
+                   'content': 'NOPE.'
+                   }
+        url = "https://api.zulip.com/v1/messages"
+        return requests.patch(url, data=payload, auth=requests.auth.HTTPBasicAuth(os.environ['ZULIP_USERNAME'], os.environ['ZULIP_API_KEY']))
+
+
+def parseCommand(content):
+    return content
+
+
+# call respond function when zulipClient interacts with gif bot
 def respond(msg):
+    # Check if message is meant for the bot
+    if isBotMessage(msg['sender_email'], msg['content']):
+        resp = getResponseContent(msg)
+        print(resp)
+        server_response = zulipClient.send_message(resp)
 
-    if msg['sender_email'] != "gif-bot@students.hackerschool.com":
-        content = msg['content'].upper().split()
-            
-        if ((content[0] == "GIF" and content[1] == "ME") 
-            or (content[0] == "@**GIF" and content[1] == "BOT**" and content[2] == "GIF" and content[3] == "ME")):
-
-            normalized = normalize_query(content)
-            api_call = "http://api.giphy.com/v1/gifs/search?limit=20&q=%s&api_key=dc6zaTOxFJmzC" % normalized
-            img_url = call_giphy(api_call)
-
-            print msg
-
-            if msg['type'] == 'stream':
-                resp = client.send_message({
-                    "type": "stream",
-                    "subject": msg["subject"],
-                    "to": msg['display_recipient'],
-                    "content": "%s" % img_url
-                })
-
-                last_message.update(msg['display_recipient'], msg["subject"], resp['id'])
-
-                print last_message.msg_ids
-
-            elif msg['type'] == 'private':
-                resp = client.send_message({
-                    "type": msg['type'],
-                    "subject": msg['subject'],
-                    "to": msg['sender_email'],
-                    "content": "%s" % img_url
-                })
-
-                # Should undo be enabled in private msgs?
-                # last_message.update(resp['id'])
-
-        elif (content[0] == "UNDO"):
-            if not last_message.checkEmpty(msg['display_recipient'], msg['subject']):
-                payload = { 'message_id': last_message.getMsgId(msg['display_recipient'], msg['subject']), 
-                            'content': 'NOPE.'
-                            }
-                url = "https://api.zulip.com/v1/messages"
-                resp = requests.patch(url, data=payload, auth=requests.auth.HTTPBasicAuth(os.environ['ZULIP_USERNAME'], os.environ['ZULIP_API_KEY']))
+        screen = LedScreen(LED_SCREEN_ADDRESS)
+        command = parseCommand(msg['content'])
+        screen.runCommand(command)
 
 
-def call_giphy(api_url):    
-    response = requests.get(api_url).content
-    loaded_json = json.loads(response)
-    count = loaded_json['pagination']['count']-1
-    if count >= 0:
-        rand_index = random.randint(0,count)
-        url = loaded_json['data'][rand_index]['images']['fixed_width']['url']
-    else:
-        # need to replace with a fun 'sorry' image if no images found
-        url = "http://i.imgflip.com/b2jul.jpg"
-    return url
+        # puts messages sent by bot to stack to enable undo functionality
+        # TODO: Push undo-message to queue.
+        # TODO: If isUndo(msg) pop the latest message, create undo to LED
 
-# accept the content of msg split into array
-def normalize_query(arr):
-    query = '+'.join(arr[2:])
-    return query.lower()
 
-# This is a blocking call that will run forever
-client.call_on_each_message(lambda msg: respond(msg))
+def main():
+    # Get subscriptions to existing streams.
+    # TODO: Fetch subscriptions dynamically
+    f = open('subscriptions.txt', 'r')
+
+
+    ZULIP_STREAM_SUBSCRIPTIONS = []
+
+    try:
+        for line in f:
+            ZULIP_STREAM_SUBSCRIPTIONS.append(line.strip())
+    finally:
+        f.close()
+
+    # Add subscriptions to bot
+    zulipClient.add_subscriptions([{"name": stream_name} for stream_name in ZULIP_STREAM_SUBSCRIPTIONS])
+
+    # This is a blocking call that will run forever, keepalive loop for the bot.
+    print("Bot running... ")
+    zulipClient.call_on_each_message(respond)
+
+main()
